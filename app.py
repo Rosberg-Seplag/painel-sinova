@@ -1,12 +1,11 @@
 # -*- coding: utf-8 -*-
 """
-Painel de Ações SINOVA MT v4.0
+Painel de Ações SINOVA MT v4.1
 ==============================
 Dashboard interativo para consulta de ações e resultados do SINOVA.
-v4.0:
-- Reformula a aba "Indicadores de Produto" para uma exibição visual com KPIs e gráficos.
-- Adiciona um gráfico de evolução para o indicador principal de cada produto.
-- Mantém a tabela detalhada em um expander para uma interface mais limpa.
+v4.1:
+- Corrige IndentationError nas abas de Ações e Detalhes.
+- Reestrutura a aba "Indicadores de Produto" para uma exibição visual.
 """
 
 import unicodedata
@@ -43,10 +42,8 @@ ORGAOS_A_EXCLUIR = [
 # =============================================================================
 # 3. FUNÇÕES DE ETL E VISUALIZAÇÃO
 # =============================================================================
-
 @st.cache_data(ttl=600, show_spinner="Carregando dados de Ações...")
 def carregar_dados_acoes() -> pd.DataFrame:
-    # Função para carregar e tratar as abas de ações (interno/externo)
     def _normalizar(nome: str) -> str:
         texto = str(nome)
         for simbolo in ("º", "°", "ª"): texto = texto.replace(simbolo, "")
@@ -92,9 +89,7 @@ def carregar_dados_indicadores() -> pd.DataFrame:
     df = pd.read_csv(URL_ABA_INDICADORES)
     if "PRODUTOS" in df.columns:
         df["PRODUTOS"] = df["PRODUTOS"].str.strip()
-    # Limpa colunas que são totalmente vazias na planilha inteira
     df = df.dropna(axis=1, how='all')
-    # Converte colunas numéricas, tratando erros
     for col in df.columns:
         if col != 'PRODUTOS':
             df[col] = pd.to_numeric(df[col], errors='coerce')
@@ -133,7 +128,23 @@ except Exception as erro:
 # 5. BARRA LATERAL - FILTROS GERAIS
 # =============================================================================
 st.sidebar.header("🎛️ Filtros para Ações")
-# ... (código dos filtros da barra lateral permanece igual)
+produtos_disponiveis = sorted(df_acoes["Produto"].unique().tolist())
+orgaos_disponiveis = sorted(df_acoes["Orgao"].unique().tolist())
+meses_disponiveis = sorted(df_acoes["MES_ANO"].unique().tolist())
+
+produtos_selecionados = st.sidebar.multiselect("Produto (Ações)", options=produtos_disponiveis, default=[], placeholder="Todos os produtos")
+orgaos_selecionados = st.sidebar.multiselect("Órgão (Ações)", options=orgaos_disponiveis, default=[], placeholder="Todos os órgãos")
+
+if len(meses_disponiveis) > 1:
+    periodo_inicio, periodo_fim = st.sidebar.select_slider("Período (mês/ano)", options=meses_disponiveis, value=(meses_disponiveis[0], meses_disponiveis[-1]))
+else:
+    periodo_inicio = periodo_fim = meses_disponiveis[0]
+
+df_filtrado = df_acoes[df_acoes["MES_ANO"].between(periodo_inicio, periodo_fim)].copy()
+if produtos_selecionados:
+    df_filtrado = df_filtrado[df_filtrado["Produto"].isin(produtos_selecionados)]
+if orgaos_selecionados:
+    df_filtrado = df_filtrado[df_filtrado["Orgao"].isin(orgaos_selecionados)]
 
 # =============================================================================
 # 6. LAYOUT COM ABAS
@@ -141,64 +152,68 @@ st.sidebar.header("🎛️ Filtros para Ações")
 tab_acoes, tab_detalhes, tab_indicadores = st.tabs(["📊 Visão Geral de Ações", "📋 Detalhes por Ação", "🏆 Indicadores de Produto"])
 
 with tab_acoes:
-    # ... (código da aba de ações permanece igual)
-    
+    if df_filtrado.empty:
+        st.warning("⚠️ Nenhuma ação encontrada para os filtros selecionados.")
+    else:
+        col_kpi1, col_kpi2, col_kpi3 = st.columns(3)
+        col_kpi1.metric("Total de Ações Realizadas", formatar_milhar(len(df_filtrado)))
+        col_kpi2.metric("Total de Participações", formatar_milhar(df_filtrado["Participantes"].sum()))
+        col_kpi3.metric("Órgãos Parceiros Envolvidos", formatar_milhar(df_filtrado["Orgao"].nunique()))
+        st.divider()
+        col_esq, col_dir = st.columns(2)
+        with col_esq:
+            df_orgaos_grafico = df_filtrado[~df_filtrado["Orgao"].isin(ORGAOS_A_EXCLUIR)]
+            acoes_por_orgao = df_orgaos_grafico["Orgao"].value_counts().head(15).rename_axis("Orgao").reset_index(name="Ações").sort_values("Ações", ascending=True)
+            st.plotly_chart(grafico_barras_h(acoes_por_orgao, x="Ações", y="Orgao", titulo="🏛️ Ações por Órgão Parceiro (Top 15)", cor=COR_PRIMARIA), use_container_width=True)
+        with col_dir:
+            acoes_por_categoria = df_filtrado["Categoria"].value_counts().rename_axis("Categoria").reset_index(name="Ações").sort_values("Ações", ascending=True)
+            st.plotly_chart(grafico_barras_h(acoes_por_categoria, x="Ações", y="Categoria", titulo="🗂️ Ações por Categoria", cor=COR_SECUNDARIA), use_container_width=True)
+        top_acoes = df_filtrado.nlargest(10, "Participantes").copy()
+        top_acoes["Ação"] = top_acoes["Atividade"].where(top_acoes["Atividade"] != "Não informado", top_acoes["Produto"]).str.slice(0, 60)
+        top_acoes["Ação"] += " (" + top_acoes["Data"].dt.strftime("%m/%Y") + ")"
+        top_acoes = top_acoes.sort_values("Participantes", ascending=True)
+        st.plotly_chart(grafico_barras_h(top_acoes, x="Participantes", y="Ação", titulo="🏆 Top 10 Ações Mais Impactantes", cor=COR_DESTAQUE), use_container_width=True)
+
 with tab_detalhes:
-    # ... (código da aba de detalhes permanece igual)
+    st.subheader("Tabela de Ações Registradas")
+    colunas_exibicao = ["Data", "Produto", "Atividade", "Orgao", "Categoria", "Participantes", "Origem"]
+    st.dataframe(
+        df_filtrado[colunas_exibicao].sort_values("Data", ascending=False),
+        use_container_width=True, hide_index=True,
+        column_config={"Data": st.column_config.DateColumn("Data", format="DD/MM/YYYY"), "Participantes": st.column_config.NumberColumn("Participantes", format="%d")},
+    )
+    st.download_button("⬇️ Baixar dados filtrados em CSV", data=df_filtrado[colunas_exibicao].to_csv(index=False).encode("utf-8-sig"), file_name="sinova_acoes_filtradas.csv", mime="text/csv")
 
 with tab_indicadores:
     st.header("Resultados Consolidados por Produto")
-    
-    # Extrai o nome do produto base para o filtro
     df_indicadores['Produto_Base'] = df_indicadores['PRODUTOS'].str.extract(r"([a-zA-ZÀ-ú\s]+)", expand=False).str.strip()
     produtos_base = sorted(df_indicadores['Produto_Base'].dropna().unique().tolist())
     
     produto_selecionado_ind = st.selectbox(
         "Selecione um Produto para ver seus resultados",
-        options=produtos_base,
-        index=0,
-        placeholder="Selecione um produto..."
+        options=produtos_base, index=0, placeholder="Selecione um produto..."
     )
-
     if produto_selecionado_ind:
         df_ind_filtrado = df_indicadores[df_indicadores['Produto_Base'] == produto_selecionado_ind]
-        
         st.subheader(f"KPIs para: {produto_selecionado_ind}")
-        
-        # --- Exibição de KPIs em Cartões ---
-        kpi_cols = st.columns(4) # Cria 4 colunas para os KPIs
+        kpi_cols = st.columns(4)
         col_idx = 0
-        
-        # Define o indicador principal para o gráfico de evolução
         indicador_principal = None
-        
         for col in df_ind_filtrado.columns:
             if col not in ['PRODUTOS', 'Produto_Base'] and not df_ind_filtrado[col].isnull().all():
                 total = df_ind_filtrado[col].sum()
-                kpi_cols[col_idx % 4].metric(
-                    label=col.replace('_', ' ').title(),
-                    value=formatar_milhar(total)
-                )
+                kpi_cols[col_idx % 4].metric(label=col.replace('_', ' ').title(), value=formatar_milhar(total))
                 col_idx += 1
-                # Define a primeira métrica encontrada como principal para o gráfico
-                if indicador_principal is None:
-                    indicador_principal = col
-
+                if indicador_principal is None: indicador_principal = col
         st.divider()
-
-        # --- Gráfico de Evolução ---
         if indicador_principal:
             st.subheader(f"Evolução de '{indicador_principal.replace('_', ' ').title()}' por Edição")
             df_chart = df_ind_filtrado[['PRODUTOS', indicador_principal]].dropna()
             df_chart = df_chart.sort_values(by='PRODUTOS')
-            
-            fig = px.bar(df_chart, x='PRODUTOS', y=indicador_principal, text_auto=True,
-                         title=f"Evolução de {indicador_principal.replace('_', ' ').title()}")
+            fig = px.bar(df_chart, x='PRODUTOS', y=indicador_principal, text_auto=True, title=f"Evolução de {indicador_principal.replace('_', ' ').title()}")
             fig.update_traces(marker_color=COR_DESTAQUE, textposition='outside')
             fig.update_layout(xaxis_title="Edição/Ano", yaxis_title=indicador_principal.replace('_', ' ').title())
             st.plotly_chart(fig, use_container_width=True)
-        
-        # --- Tabela de Detalhes ---
         with st.expander("Ver dados completos da tabela"):
             df_tabela = df_ind_filtrado.drop(columns=['Produto_Base']).dropna(axis=1, how='all').set_index('PRODUTOS')
             st.dataframe(df_tabela, use_container_width=True)
